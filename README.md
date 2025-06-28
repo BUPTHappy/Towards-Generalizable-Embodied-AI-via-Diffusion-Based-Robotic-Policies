@@ -22,7 +22,7 @@ We provide a colab notebook for UVA on [PushT](https://colab.research.google.com
 ## 🛠️ Installation
 Install the conda environment:
 ```console
-$ mamba env create -f conda_environment.yaml
+$ mamba env create -f conda_environment.yml
 ```
 
 ## Simulation Experiments
