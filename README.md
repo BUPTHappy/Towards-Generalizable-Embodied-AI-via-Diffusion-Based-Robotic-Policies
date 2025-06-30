@@ -37,9 +37,9 @@ Download the pretrained checkpoints from the following links and put them in the
 * Checkpoint trained on [Libero10](https://drive.google.com/file/d/11c2VrmaRp48yw__5A5xpcu8EPzkexHSi/view?usp=sharing)
 ```
 pip install gdown
-gdown 1OduHcxfc2hqUYSccMQNf9g-vAt-q2UhF -O /path/to/checkpoints/checkpoint.ckpt
-gdown 1ZppZJyQdEdjhu8TIt4ddyaWy_mSdjoAZ -O /path/to/checkpoints/checkpoint.ckpt
-gdown 11c2VrmaRp48yw__5A5xpcu8EPzkexHSi -O /path/to/checkpoints/checkpoint.ckpt
+gdown 1OduHcxfc2hqUYSccMQNf9g-vAt-q2UhF -O checkpoints/pusht.ckpt
+gdown 1ZppZJyQdEdjhu8TIt4ddyaWy_mSdjoAZ -O checkpoints/pusht_multitask.ckpt
+gdown 11c2VrmaRp48yw__5A5xpcu8EPzkexHSi -O checkpoints/libero10.ckpt
 ```
 
 ```
