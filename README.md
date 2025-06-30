@@ -35,6 +35,12 @@ Download the pretrained checkpoints from the following links and put them in the
 * Checkpoint trained on [PushT](https://drive.google.com/file/d/1OduHcxfc2hqUYSccMQNf9g-vAt-q2UhF/view?usp=sharing) 
 * Checkpoint trained on [PushT-M](https://drive.google.com/file/d/1ZppZJyQdEdjhu8TIt4ddyaWy_mSdjoAZ/view?usp=sharing)
 * Checkpoint trained on [Libero10](https://drive.google.com/file/d/11c2VrmaRp48yw__5A5xpcu8EPzkexHSi/view?usp=sharing)
+```
+pip install gdown
+gdown 1OduHcxfc2hqUYSccMQNf9g-vAt-q2UhF -O /path/to/checkpoints/checkpoint.ckpt
+gdown 1ZppZJyQdEdjhu8TIt4ddyaWy_mSdjoAZ -O /path/to/checkpoints/checkpoint.ckpt
+gdown 11c2VrmaRp48yw__5A5xpcu8EPzkexHSi -O /path/to/checkpoints/checkpoint.ckpt
+```
 
 ```
 CUDA_VISIBLE_DEVICES=0 python eval_sim.py --checkpoint checkpoints/pusht.ckpt --output_dir checkpoints/pusht
