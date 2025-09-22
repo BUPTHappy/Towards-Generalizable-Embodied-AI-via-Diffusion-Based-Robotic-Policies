@@ -108,6 +108,7 @@ class UnifiedVideoActionPolicy(BaseImagePolicy):
             language_emb_model=language_emb_model,
             shape_meta=shape_meta,
         )
+        
 
         ## =========================== load pretrained model ===========================
         self.pretrained_model_path = autoregressive_model_params.pretrained_model_path
@@ -180,8 +181,11 @@ class UnifiedVideoActionPolicy(BaseImagePolicy):
                 print("----------------------------------------------------------------------")
                 
                 assert len(model_state_dict) > 0
-                assert len(pretrained_state_dict) > 0
-                model_state_dict.update(pretrained_state_dict)
+                if len(pretrained_state_dict) > 0:
+                    model_state_dict.update(pretrained_state_dict)
+                    print(f"Loaded {len(pretrained_state_dict)} compatible parameters from pretrained model")
+                else:
+                    print("Warning: No compatible parameters found in pretrained model, continuing without loading pretrained weights")
 
                 missing_keys, unexpected_keys = self.model.load_state_dict(
                     model_state_dict, strict=False
@@ -279,11 +283,11 @@ class UnifiedVideoActionPolicy(BaseImagePolicy):
         if self.use_proprioception:
             if "second_image" in proprioception_input:
                 second_image_z, _ = extract_latent_autoregressive(
-                    self.vae_model, proprioception_input["second_image"]
+                    self.vae_model, proprioception_input["second_image"], use_checkpointing=getattr(self, 'use_vae_checkpointing', False), chunk_size=getattr(self, 'vae_chunk_size', 4), batch_chunk_size=getattr(self, 'vae_batch_chunk_size', 8)
                 )
                 proprioception_input["second_image_z"] = second_image_z
 
-        c, latent_size = extract_latent_autoregressive(self.vae_model, c.detach())
+        c, latent_size = extract_latent_autoregressive(self.vae_model, c.detach(), use_checkpointing=getattr(self, 'use_vae_checkpointing', False), chunk_size=getattr(self, 'vae_chunk_size', 4), batch_chunk_size=getattr(self, 'vae_batch_chunk_size', 8))
 
         z, act_out = self.model.sample_tokens(
             bsz=B,
@@ -347,17 +351,33 @@ class UnifiedVideoActionPolicy(BaseImagePolicy):
         betas: Tuple[float, float],
     ) -> torch.optim.Optimizer:
 
-        optim_groups = self.add_weight_decay(self.model, weight_decay=weight_decay)
-        optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=betas)
+        decay = []
+        no_decay = []
+        local_decay = []
+        local_no_decay = []
 
-        # Manually set 'initial_lr' for each parameter group (assuming a base learning rate)
-        for param_group in optimizer.param_groups:
-            if "initial_lr" not in param_group:
-                param_group["initial_lr"] = param_group[
-                    "lr"
-                ]  # or set a specific initial learning rate
-
-        return optimizer
+        for name, param in self.model.named_parameters():
+            if not param.requires_grad:
+                continue
+            if "local_causal_blocks" in name or 'feature_fusion' in name:
+                if len(param.shape) == 1 or name.endswith(".bias"):
+                    local_no_decay.append(param)
+                else:
+                    local_decay.append(param)
+            else:
+                if len(param.shape) == 1 or name.endswith(".bias"):
+                    no_decay.append(param)
+                else:
+                    decay.append(param)
+                    
+        return torch.optim.AdamW([
+            #原来的参数 - 小学习率
+            {"params": no_decay, "weight_decay": 0.0, "lr": learning_rate * 0.1},
+            {"params": decay, "weight_decay": weight_decay, "lr": learning_rate * 0.1},
+            #新的参数 - 正常的学习率
+            {"params": local_no_decay, "weight_decay": 0.0, "lr": learning_rate},
+            {"params": local_decay, "weight_decay": weight_decay, "lr": learning_rate},
+        ],betas=betas)
 
     def compute_loss(self, batch, **kwargs):
         B, T, C, H, W = batch["obs"]["image"].size()

@@ -4,8 +4,6 @@ from einops import rearrange
 
 from unified_video_action.model.autoregressive.diffusion import create_diffusion
 from unified_video_action.model.autoregressive.diffusion_loss import SimpleMLPAdaLN
-from unified_video_action.model.autoregressive.cross_attention_diffusion import CrossAttentionAdaLN
-
 
 #实现基于扩散模型的动作预测损失函数的主要代码，用于从视频特征预测动作序列
 class DiffActLoss(nn.Module):
@@ -23,7 +21,6 @@ class DiffActLoss(nn.Module):
         act_diff_training_steps=1000, #训练时的扩散步数
         act_diff_testing_steps="100", #测试时的扩散步数
         act_model_type="conv_fc",  #特征处理架构类型（卷积+全连接）
-        num_attention_heads=8, #new
         **kwargs
     ):
         super(DiffActLoss, self).__init__()
@@ -96,25 +93,14 @@ class DiffActLoss(nn.Module):
         else:
             raise NotImplementedError
 
-        #replace SimpleMLPAdaLN with our CrossAttentionAdaLN
-        if self.act_model_type == "cross_attention":
-            self.net = CrossAttentionAdaLN(
-                in_channels=target_channels,
-                model_channels=width,
-                out_channels=target_channels * 2,  # for vlb loss
-                z_channels=z_channels,
-                num_res_blocks=depth,
-                num_attention_heads=num_attention_heads,
-                grad_checkpointing=grad_checkpointing,
-        )
-        else: 
-            self.net = SimpleMLPAdaLN(
-                in_channels=target_channels,
-                model_channels=width,
-                out_channels=target_channels * 2,  # for vlb loss
-                z_channels=z_channels,
-                num_res_blocks=depth,
-                grad_checkpointing=grad_checkpointing,
+        #扩散模型的核心，负责实际的去噪和动作预测
+        self.net = SimpleMLPAdaLN(
+            in_channels=target_channels,
+            model_channels=width,
+            out_channels=target_channels * 2,  # for vlb loss
+            z_channels=z_channels,
+            num_res_blocks=depth,
+            grad_checkpointing=grad_checkpointing,
         )
 
         self.train_diffusion = create_diffusion(

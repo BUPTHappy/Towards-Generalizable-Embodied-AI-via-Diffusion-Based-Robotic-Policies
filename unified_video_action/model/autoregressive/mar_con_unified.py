@@ -2,18 +2,20 @@ from functools import partial
 
 import numpy as np
 from tqdm import tqdm
-import scipy.stats as stats
+import scipy.stats as stats #用于生成随机掩码比例
 import math
-from einops import rearrange
+from einops import rearrange #用于张量维度重排
 import torch
 import torch.nn as nn
-from torch.utils.checkpoint import checkpoint
+from torch.utils.checkpoint import checkpoint #用于节省显存的梯度检查点技术
 
 from timm.models.vision_transformer import Block
 from unified_video_action.model.autoregressive.diffusion_loss import DiffLoss
 from unified_video_action.model.autoregressive.diffusion_action_loss import DiffActLoss
 
+from unified_video_action.model.autoregressive.local_causal_attention import LocalCausalAttentionBlock
 
+#根据预设的顺序创建掩码
 def mask_by_order(mask_len, order, bsz, seq_len, device):
     masking = torch.zeros(bsz, seq_len).to(device)
     masking = torch.scatter(
@@ -61,46 +63,51 @@ class MAR(nn.Module):
     ):
         super().__init__()
 
-        self.task_name = kwargs["task_name"]
+        self.task_name = kwargs["task_name"] # 任务名称
         self.different_history_freq = kwargs["different_history_freq"]
         self.use_history_action = kwargs["use_history_action"]
-        self.action_mask_ratio = kwargs["action_mask_ratio"]
-        self.use_proprioception = kwargs["use_proprioception"]
-        self.predict_wrist_img = kwargs["predict_wrist_img"]
-        self.predict_proprioception = kwargs["predict_proprioception"]
-        self.n_frames = 4
+        self.action_mask_ratio = kwargs["action_mask_ratio"] # 动作掩码比例
+        self.use_proprioception = kwargs["use_proprioception"] # 是否使用感知
+        self.predict_wrist_img = kwargs["predict_wrist_img"] # 是否预测手腕图像
+        self.predict_proprioception = kwargs["predict_proprioception"] # 是否预测感知
+        self.n_frames = 4 # 固定处理4帧视频
 
         # ========= VAE and patchify specifics =========
-        self.img_size = img_size
-        self.vae_stride = vae_stride
-        self.patch_size = patch_size
-        self.seq_h = self.seq_w = img_size // vae_stride // patch_size
-        self.seq_len = self.seq_h * self.seq_w
-        self.token_embed_dim = vae_embed_dim * patch_size**2
+            # 输入图像 256x256 → VAE编码后 16x16 → 每个位置是一个token
+            # 总共有 16×16=256 个空间位置的token
+            # 4帧视频 × 256个空间token = 1024个时空token
+        
+        self.img_size = img_size # 图像大小 256x256
+        self.vae_stride = vae_stride # VAE下采样倍数 16
+        self.patch_size = patch_size # 补丁大小
+        self.seq_h = self.seq_w = img_size // vae_stride // patch_size # 16x16=256个空间位置
+        self.seq_len = self.seq_h * self.seq_w # 256个空间位置
+        self.token_embed_dim = vae_embed_dim * patch_size**2  
         self.vae_embed_dim = vae_embed_dim
         self.grad_checkpointing = grad_checkpointing
         self.label_drop_prob = label_drop_prob
-
+        
         # ========= Masked MAE =========
         # variant masking ratio, a left-half truncated Gaussian centered at 100% masking ratio with std 0.25
+            # 掩码比例生成器，左半截断高斯分布，中心在100%，标准差为0.25： 大部分时候会掩盖70%-100%的token
         self.mask_ratio_generator = stats.truncnorm(
             (mask_ratio_min - 1.0) / 0.25, 0, loc=1.0, scale=0.25
         )
 
         # ========= Projection =========
-        # conditional frames
+        # conditional frames 条件帧投影（历史观察帧）
         self.z_proj_cond = nn.Linear(self.token_embed_dim, encoder_embed_dim, bias=True)
 
-        # video frames
+        # video frames 目标帧投影（要预测的视频帧）
         self.z_proj = nn.Linear(self.token_embed_dim, encoder_embed_dim, bias=True)
 
-        # wrist video frames
+        # wrist video frames 手腕相机投影（如果预测手腕图像）
         if self.predict_wrist_img:
             self.z_proj_wrist = nn.Linear(
                 self.token_embed_dim, encoder_embed_dim, bias=True
             )
 
-        # action
+        # action 动作
         self.predict_action = action_model_params["predict_action"]
         act_dim = kwargs["shape_meta"]["action"]["shape"][0]
 
@@ -108,6 +115,7 @@ class MAR(nn.Module):
         self.buffer_size_action = 64
 
         # ========= Fake Latent =========
+         
         self.fake_latent_x = nn.Parameter(torch.zeros(1, encoder_embed_dim))
         self.fake_action_latent = nn.Parameter(torch.zeros(1, encoder_embed_dim))
         if self.predict_wrist_img:
@@ -214,6 +222,35 @@ class MAR(nn.Module):
         )
         self.encoder_norm = norm_layer(encoder_embed_dim)
 
+        # ========= Local Causal Attention Blocks =========
+        self.local_causal_blocks = nn.ModuleList([
+            LocalCausalAttentionBlock(
+                encoder_embed_dim,
+                encoder_num_heads,
+                window_size=3,
+                dropout=attn_dropout,
+            )
+            for _ in range(2)
+        ])
+        
+        # ========= Feature Fusion =========
+        self.feature_fusion = nn.Sequential(
+            nn.Linear(encoder_embed_dim * 2, encoder_embed_dim * 4),
+            nn.LayerNorm(encoder_embed_dim * 4),
+            nn.GELU(),
+            nn.Dropout(proj_dropout),
+            nn.Linear(encoder_embed_dim * 4, encoder_embed_dim),
+            nn.LayerNorm(encoder_embed_dim),
+            nn.GELU(),
+            nn.Dropout(proj_dropout)
+        )
+        
+        # 添加门控机制
+        self.gate = nn.Sequential(
+            nn.Linear(encoder_embed_dim * 2, encoder_embed_dim),
+            nn.Sigmoid()
+        )
+
         # ========= Decoder =========
         self.decoder_embed = nn.Linear(encoder_embed_dim, decoder_embed_dim, bias=True)
 
@@ -305,6 +342,7 @@ class MAR(nn.Module):
                 act_model_type=action_model_params["act_model_type"],
                 act_diff_training_steps=act_diff_training_steps,
                 act_diff_testing_steps=act_diff_testing_steps,
+                num_attention_heads=action_model_params.get("num_attention_heads", 8), #new
                 language_emb_model=self.language_emb_model,
                 language_emb_model_type=self.language_emb_model_type,
             )
@@ -656,7 +694,26 @@ class MAR(nn.Module):
                 x = block(x)
         x = self.encoder_norm(x)
 
-        return x
+        # ========= Local Causal Attention Blocks =========
+        local_x = x
+        for block in self.local_causal_blocks:
+            local_x = block(local_x)
+        
+        # ========= Feature Fusion =========
+        # 计算门控权重
+        concat_features = torch.cat([x, local_x], dim=-1)
+        gate_weights = self.gate(concat_features)
+        
+        # 加权融合
+        weighted_local = local_x * gate_weights
+        weighted_global = x * (1 - gate_weights)
+        
+        # 最终融合
+        fused_x = self.feature_fusion(
+            torch.cat([weighted_global, weighted_local], dim=-1)
+        )
+
+        return fused_x
 
     def forward_mae_decoder(self, x, mask):
         B, T, S = mask.size()

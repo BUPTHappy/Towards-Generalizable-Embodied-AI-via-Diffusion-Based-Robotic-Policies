@@ -243,7 +243,7 @@ class Encoder(nn.Module):
             padding=1,
         )
 
-    def forward(self, x):
+    def forward(self, x, use_checkpointing=False):
         # assert x.shape[2] == x.shape[3] == self.resolution, "{}, {}, {}".format(x.shape[2], x.shape[3], self.resolution)
 
         # timestep embedding
@@ -253,18 +253,38 @@ class Encoder(nn.Module):
         hs = [self.conv_in(x)]
         for i_level in range(self.num_resolutions):
             for i_block in range(self.num_res_blocks):
-                h = self.down[i_level].block[i_block](hs[-1], temb)
+                if use_checkpointing:
+                    h = torch.utils.checkpoint.checkpoint(
+                        self.down[i_level].block[i_block], hs[-1], temb, use_reentrant=False
+                    )
+                else:
+                    h = self.down[i_level].block[i_block](hs[-1], temb)
                 if len(self.down[i_level].attn) > 0:
-                    h = self.down[i_level].attn[i_block](h)
+                    if use_checkpointing:
+                        h = torch.utils.checkpoint.checkpoint(
+                            self.down[i_level].attn[i_block], h, use_reentrant=False
+                        )
+                    else:
+                        h = self.down[i_level].attn[i_block](h)
                 hs.append(h)
             if i_level != self.num_resolutions - 1:
-                hs.append(self.down[i_level].downsample(hs[-1]))
+                if use_checkpointing:
+                    hs.append(torch.utils.checkpoint.checkpoint(
+                        self.down[i_level].downsample, hs[-1], use_reentrant=False
+                    ))
+                else:
+                    hs.append(self.down[i_level].downsample(hs[-1]))
 
         # middle
         h = hs[-1]
-        h = self.mid.block_1(h, temb)
-        h = self.mid.attn_1(h)
-        h = self.mid.block_2(h, temb)
+        if use_checkpointing:
+            h = torch.utils.checkpoint.checkpoint(self.mid.block_1, h, temb, use_reentrant=False)
+            h = torch.utils.checkpoint.checkpoint(self.mid.attn_1, h, use_reentrant=False)
+            h = torch.utils.checkpoint.checkpoint(self.mid.block_2, h, temb, use_reentrant=False)
+        else:
+            h = self.mid.block_1(h, temb)
+            h = self.mid.attn_1(h)
+            h = self.mid.block_2(h, temb)
 
         # end
         h = self.norm_out(h)
@@ -484,8 +504,8 @@ class AutoencoderKL(nn.Module):
         print(f"Restored from {path}")
         print("-------------------------------------------------------------------")
 
-    def encode(self, x):
-        h = self.encoder(x)
+    def encode(self, x, use_checkpointing=False):
+        h = self.encoder(x, use_checkpointing=use_checkpointing)
         moments = self.quant_conv(h)
         if not self.use_variational:
             moments = torch.cat((moments, torch.ones_like(moments)), 1)

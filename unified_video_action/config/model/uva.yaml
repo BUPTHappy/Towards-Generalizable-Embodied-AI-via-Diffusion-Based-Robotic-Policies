@@ -49,8 +49,10 @@ policy:
     act_diff_testing_steps: "100"
     
   action_model_params:
-    predict_action: False
-    act_model_type: conv_fc
+    predict_action: True
+    act_model_type: cross_attention
+    num_attention_heads: 8
+    attention_dropout: 0.1
   
   shift_action: True
     

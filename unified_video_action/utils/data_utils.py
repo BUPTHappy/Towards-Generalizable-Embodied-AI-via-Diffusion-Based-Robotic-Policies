@@ -388,13 +388,54 @@ def get_trajectory(nactions, T, shift_action, use_history_action=False):
     return history_trajectory, trajectory
 
 
-def extract_latent_autoregressive(vae_model, x):
+def extract_latent_autoregressive(vae_model, x, use_checkpointing=False, chunk_size=4, batch_chunk_size=8):
     x = x.float()
     B, C, T, H, W = x.size()
-    with torch.no_grad():
-        posterior = vae_model.encode(rearrange(x, "b c t h w -> (b t) c h w"))
-        z = posterior.sample().mul_(0.2325)
-        z = rearrange(z, "(b t) c h w -> b t c h w", b=B)
+    # Process in chunks to reduce memory usage
+    if T > chunk_size or T > 8 or B > batch_chunk_size:  # Always chunk if large batch or many frames
+        z_chunks = []
+        
+        # Process batches in chunks
+        for b_start in range(0, B, batch_chunk_size):
+            b_end = min(b_start + batch_chunk_size, B)
+            x_batch = x[b_start:b_end]
+            batch_z_chunks = []
+            
+            # Process time dimension in chunks
+            for t_start in range(0, T, chunk_size):
+                t_end = min(t_start + chunk_size, T)
+                x_chunk = x_batch[:, :, t_start:t_end, :, :]
+                
+                with torch.no_grad():
+                    posterior = vae_model.encode(rearrange(x_chunk, "b c t h w -> (b t) c h w"), use_checkpointing=use_checkpointing)
+                    z_chunk = posterior.sample().mul_(0.2325)
+                    z_chunk = rearrange(z_chunk, "(b t) c h w -> b t c h w", b=x_batch.size(0))
+                    batch_z_chunks.append(z_chunk)
+                
+                # Clear intermediate tensors
+                del x_chunk, posterior, z_chunk
+                torch.cuda.empty_cache()
+            
+            # Concatenate time chunks for this batch
+            if len(batch_z_chunks) == 1:
+                batch_z = batch_z_chunks[0]
+            else:
+                batch_z = torch.cat(batch_z_chunks, dim=1)  # Concatenate along time dimension
+            z_chunks.append(batch_z)
+            del x_batch, batch_z_chunks
+        
+        # Concatenate batch chunks
+        if len(z_chunks) == 1:
+            z = z_chunks[0]
+        else:
+            z = torch.cat(z_chunks, dim=0)  # Concatenate along batch dimension
+        del z_chunks
+    else:
+        with torch.no_grad():
+            posterior = vae_model.encode(rearrange(x, "b c t h w -> (b t) c h w"), use_checkpointing=use_checkpointing)
+            z = posterior.sample().mul_(0.2325)
+            z = rearrange(z, "(b t) c h w -> b t c h w", b=B)
+    
     latent_size = z.size()[2:]
     return z, latent_size
 

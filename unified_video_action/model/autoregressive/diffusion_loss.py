@@ -201,39 +201,43 @@ class SimpleMLPAdaLN(nn.Module):
 
     def __init__(
         self,
-        in_channels,
-        model_channels,
-        out_channels,
-        z_channels,
-        num_res_blocks,
-        grad_checkpointing=False,
+        in_channels, # 输入通道数
+        model_channels, # 网络内部的特征维度（所有层的统一宽度）
+        out_channels, # 输出通道数
+        z_channels, # 条件通道数
+        num_res_blocks, # 残差块的数量
+        grad_checkpointing=False, # 是否使用梯度检查点（为了优化内存的）
     ):
-        super().__init__()
+        super().__init__() # 初始化父类
 
         self.in_channels = in_channels
         self.model_channels = model_channels
         self.out_channels = out_channels
         self.num_res_blocks = num_res_blocks
         self.grad_checkpointing = grad_checkpointing
-
+        
+        #创建时间步嵌入器，将时间步转换为特征向量
         self.time_embed = TimestepEmbedder(model_channels)
+        #创建条件嵌入器，将条件转换为特征向量
         self.cond_embed = nn.Linear(z_channels, model_channels)
-
+        #创建输入投影层，将输入特征映射到模型内部维度
         self.input_proj = nn.Linear(in_channels, model_channels)
-
+        
+        #创建残差块列表
         res_blocks = []
         for i in range(num_res_blocks):
             res_blocks.append(
                 ResBlock(
-                    model_channels,
+                    model_channels, 
                 )
             )
+        
+        self.res_blocks = nn.ModuleList(res_blocks) #把残差块列表转换成PyTorch的ModuleList，这样参数才能被正确注册和训练
+        self.final_layer = FinalLayer(model_channels, out_channels) #创建最终输出层，把model_channels维转换成out_channels维
 
-        self.res_blocks = nn.ModuleList(res_blocks)
-        self.final_layer = FinalLayer(model_channels, out_channels)
+        self.initialize_weights() #初始化权重
 
-        self.initialize_weights()
-
+    #初始化权重
     def initialize_weights(self):
         def _basic_init(module):
             if isinstance(module, nn.Linear):
@@ -243,16 +247,16 @@ class SimpleMLPAdaLN(nn.Module):
 
         self.apply(_basic_init)
 
-        # Initialize timestep embedding MLP
+        # 对时间嵌入器的第0层和第2层权重用标准差0.02的正态分布初始化
         nn.init.normal_(self.time_embed.mlp[0].weight, std=0.02)
         nn.init.normal_(self.time_embed.mlp[2].weight, std=0.02)
 
-        # Zero-out adaLN modulation layers
+        # Zero-out adaLN modulation layers 将每个块的AdaLN调制层的最后一层权重和偏置初始化为0
         for block in self.res_blocks:
             nn.init.constant_(block.adaLN_modulation[-1].weight, 0)
             nn.init.constant_(block.adaLN_modulation[-1].bias, 0)
 
-        # Zero-out output layers
+        # Zero-out output layers 网络开始时输出为0（纯噪声预测）
         nn.init.constant_(self.final_layer.adaLN_modulation[-1].weight, 0)
         nn.init.constant_(self.final_layer.adaLN_modulation[-1].bias, 0)
         nn.init.constant_(self.final_layer.linear.weight, 0)
@@ -265,17 +269,18 @@ class SimpleMLPAdaLN(nn.Module):
         :param t: a 1-D batch of timesteps.
         :param c: conditioning from AR transformer.
         :return: an [N x C] Tensor of outputs.
+        一个智能橡皮擦，能根据"擦到第几步了"和"什么场景下擦"来决定怎么擦掉噪声
         """
 
-        x = self.input_proj(x)
-        t = self.time_embed(t)
-        c = self.cond_embed(c)
+        x = self.input_proj(x) #输入动作（带噪声的）
+        t = self.time_embed(t) #时间步嵌入
+        c = self.cond_embed(c) #条件特征
 
-        y = t + c
+        y = t + c #控制信号y
 
         if self.grad_checkpointing and not torch.jit.is_scripting():
             for block in self.res_blocks:
-                x = checkpoint(block, x, y)
+                x = checkpoint(block, x, y) #如果启用梯度检查点，用checkpoint函数包装每个残差块（节省内存）
         else:
             for block in self.res_blocks:
                 x = block(x, y)
@@ -284,10 +289,10 @@ class SimpleMLPAdaLN(nn.Module):
 
     def forward_with_cfg(self, x, t, c, cfg_scale):
         half = x[: len(x) // 2]
-        combined = torch.cat([half, half], dim=0)
-        model_out = self.forward(combined, t, c)
+        combined = torch.cat([half, half], dim=0) #将前一半复制一份并拼接，用于有条件和无条件预测
+        model_out = self.forward(combined, t, c) 
         eps, rest = model_out[:, : self.in_channels], model_out[:, self.in_channels :]
         cond_eps, uncond_eps = torch.split(eps, len(eps) // 2, dim=0)
-        half_eps = uncond_eps + cfg_scale * (cond_eps - uncond_eps)
+        half_eps = uncond_eps + cfg_scale * (cond_eps - uncond_eps) #CFG公式：最终预测 = 无条件预测 + cfg_scale × (有条件预测 - 无条件预测)
         eps = torch.cat([half_eps, half_eps], dim=0)
         return torch.cat([eps, rest], dim=1)
