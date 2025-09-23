@@ -25,7 +25,7 @@ if [ -z "$STY" ]; then
         read -n 1
     "
     
-    echo "✅ Training started in screen session 'improved_finetune'"
+    echo "Training started in screen session 'improved_finetune'"
     echo ""
     echo "📋 Useful commands:"
     echo "  • Attach to session:    screen -r improved_finetune"
@@ -104,7 +104,7 @@ echo 'Checking Phase 1 performance...'
     --threshold=0.1
 
 if [ $? -ne 0 ]; then
-    echo "❌ Phase 1 performance check failed!"
+    echo "Phase 1 performance check failed!"
     echo "Consider adjusting learning rate or initialization"
     echo "Continuing to Phase 2 with caution..."
 fi
