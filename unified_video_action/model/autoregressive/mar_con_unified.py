@@ -13,7 +13,92 @@ from timm.models.vision_transformer import Block
 from unified_video_action.model.autoregressive.diffusion_loss import DiffLoss
 from unified_video_action.model.autoregressive.diffusion_action_loss import DiffActLoss
 
-from unified_video_action.model.autoregressive.local_causal_attention import LocalCausalAttentionBlock
+# from unified_video_action.model.autoregressive.local_causal_attention import LocalCausalAttentionBlock
+
+class LocalCausalTransformerBlock(nn.Module):
+    """Transformer block with local causal attention window mechanism"""
+    
+    def __init__(self, dim, num_heads, mlp_ratio=4.0, qkv_bias=True, norm_layer=nn.LayerNorm, 
+                 proj_drop=0.0, attn_drop=0.0, window_size=3):
+        super().__init__()
+        self.norm1 = norm_layer(dim)
+        self.attn = LocalCausalAttention(dim, num_heads=num_heads, qkv_bias=qkv_bias, 
+                                       attn_drop=attn_drop, proj_drop=proj_drop, window_size=window_size)
+        self.norm2 = norm_layer(dim)
+        mlp_hidden_dim = int(dim * mlp_ratio)
+        self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=nn.GELU, drop=proj_drop)
+
+    def forward(self, x):
+        x = x + self.attn(self.norm1(x))
+        x = x + self.mlp(self.norm2(x))
+        return x
+
+class LocalCausalAttention(nn.Module):
+    """Multi-head attention with local causal window mechanism"""
+    
+    def __init__(self, dim, num_heads=8, qkv_bias=False, attn_drop=0., proj_drop=0., window_size=3):
+        super().__init__()
+        self.num_heads = num_heads
+        head_dim = dim // num_heads
+        self.scale = head_dim ** -0.5
+        self.window_size = window_size
+
+        self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
+        self.attn_drop = nn.Dropout(attn_drop)
+        self.proj = nn.Linear(dim, dim)
+        self.proj_drop = nn.Dropout(proj_drop)
+
+    def create_local_causal_mask(self, seq_len):
+        """Create local causal mask with window size"""
+        mask = torch.zeros(seq_len, seq_len)
+        
+        for i in range(seq_len):
+            # Each position can only attend to current and previous window_size-1 positions
+            start_idx = max(0, i - self.window_size + 1)
+            mask[i, start_idx:i+1] = 1
+            
+        return mask == 0  # True for positions that should be masked
+
+    def forward(self, x):
+        B, N, C = x.shape
+        
+        # Generate Q, K, V
+        qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
+        q, k, v = qkv[0], qkv[1], qkv[2]  # make torchscript happy (cannot use tensor as tuple)
+
+        # Scale attention
+        attn = (q @ k.transpose(-2, -1)) * self.scale
+        
+        # Apply local causal mask
+        local_causal_mask = self.create_local_causal_mask(N).to(x.device)
+        attn = attn.masked_fill(local_causal_mask, float('-inf'))
+        
+        attn = attn.softmax(dim=-1)
+        attn = self.attn_drop(attn)
+
+        x = (attn @ v).transpose(1, 2).reshape(B, N, C)
+        x = self.proj(x)
+        x = self.proj_drop(x)
+        return x
+
+class Mlp(nn.Module):
+    """MLP as used in Vision Transformer, MLP-Mixer and related networks"""
+    def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, drop=0.):
+        super().__init__()
+        out_features = out_features or in_features
+        hidden_features = hidden_features or in_features
+        self.fc1 = nn.Linear(in_features, hidden_features)
+        self.act = act_layer()
+        self.fc2 = nn.Linear(hidden_features, out_features)
+        self.drop = nn.Dropout(drop)
+
+    def forward(self, x):
+        x = self.fc1(x)
+        x = self.act(x)
+        x = self.drop(x)
+        x = self.fc2(x)
+        x = self.drop(x)
+        return x
 
 #根据预设的顺序创建掩码
 def mask_by_order(mask_len, order, bsz, seq_len, device):
@@ -206,6 +291,7 @@ class MAR(nn.Module):
         self.z_proj_ln = nn.LayerNorm(encoder_embed_dim, eps=1e-6)
 
         # ========= Encoder Blocks =========
+        # Original transformer blocks
         self.encoder_blocks = nn.ModuleList(
             [
                 Block(
@@ -222,34 +308,30 @@ class MAR(nn.Module):
         )
         self.encoder_norm = norm_layer(encoder_embed_dim)
 
-        # ========= Local Causal Attention Blocks =========
-        self.local_causal_blocks = nn.ModuleList([
-            LocalCausalAttentionBlock(
-                encoder_embed_dim,
-                encoder_num_heads,
-                window_size=3,
-                dropout=attn_dropout,
-            )
-            for _ in range(2)
-        ])
+        # ========= Local Causal Encoder Blocks (copy of original with window mechanism) =========
+        self.local_causal_encoder_blocks = nn.ModuleList(
+            [
+                LocalCausalTransformerBlock(
+                    encoder_embed_dim,
+                    encoder_num_heads,
+                    mlp_ratio,
+                    qkv_bias=True,
+                    norm_layer=norm_layer,
+                    proj_drop=proj_dropout,
+                    attn_drop=attn_dropout,
+                    window_size=15,  # 增加窗口大小，从3改为8，提供更大的感受野
+                )
+                for _ in range(encoder_depth)
+            ]
+        )
+        self.local_causal_encoder_norm = norm_layer(encoder_embed_dim)
         
         # ========= Feature Fusion =========
-        self.feature_fusion = nn.Sequential(
-            nn.Linear(encoder_embed_dim * 2, encoder_embed_dim * 4),
-            nn.LayerNorm(encoder_embed_dim * 4),
-            nn.GELU(),
-            nn.Dropout(proj_dropout),
-            nn.Linear(encoder_embed_dim * 4, encoder_embed_dim),
-            nn.LayerNorm(encoder_embed_dim),
-            nn.GELU(),
-            nn.Dropout(proj_dropout)
-        )
+        # 极简的特征融合：只用一个线性层
+        self.feature_fusion = nn.Linear(encoder_embed_dim * 2, encoder_embed_dim)
         
-        # 添加门控机制
-        self.gate = nn.Sequential(
-            nn.Linear(encoder_embed_dim * 2, encoder_embed_dim),
-            nn.Sigmoid()
-        )
+        # 使用简单的λ参数控制特征融合权重，避免训练门控网络
+        self.lambda_local = 0.1  # 使用很小的权重，避免破坏原始特征
 
         # ========= Decoder =========
         self.decoder_embed = nn.Linear(encoder_embed_dim, decoder_embed_dim, bias=True)
@@ -297,7 +379,16 @@ class MAR(nn.Module):
         )
 
         # ========= Initialize Weights =========
+        # 先初始化所有参数
         self.initialize_weights()
+        
+        # ========= Copy Parameters from Original to Local Causal =========
+        # 复制训练好的参数到local causal blocks
+        self.copy_encoder_parameters()
+        
+        # ========= Re-initialize Only New Parameters =========
+        # 重新初始化新添加的融合网络参数
+        self.initialize_fusion_weights()
 
         # ========= Video Diffusion Loss =========
         self.predict_video = predict_video
@@ -415,6 +506,52 @@ class MAR(nn.Module):
 
         # initialize nn.Linear and nn.LayerNorm
         self.apply(self._init_weights)
+
+    def copy_encoder_parameters(self):
+        """Copy parameters from original encoder blocks to local causal encoder blocks"""
+        for i, (orig_block, local_block) in enumerate(zip(self.encoder_blocks, self.local_causal_encoder_blocks)):
+            # Copy attention parameters
+            local_block.attn.qkv.weight.data = orig_block.attn.qkv.weight.data.clone()
+            if orig_block.attn.qkv.bias is not None:
+                local_block.attn.qkv.bias.data = orig_block.attn.qkv.bias.data.clone()
+            
+            local_block.attn.proj.weight.data = orig_block.attn.proj.weight.data.clone()
+            if orig_block.attn.proj.bias is not None:
+                local_block.attn.proj.bias.data = orig_block.attn.proj.bias.data.clone()
+            
+            # Copy MLP parameters
+            local_block.mlp.fc1.weight.data = orig_block.mlp.fc1.weight.data.clone()
+            if orig_block.mlp.fc1.bias is not None:
+                local_block.mlp.fc1.bias.data = orig_block.mlp.fc1.bias.data.clone()
+            
+            local_block.mlp.fc2.weight.data = orig_block.mlp.fc2.weight.data.clone()
+            if orig_block.mlp.fc2.bias is not None:
+                local_block.mlp.fc2.bias.data = orig_block.mlp.fc2.bias.data.clone()
+            
+            # Copy normalization parameters
+            local_block.norm1.weight.data = orig_block.norm1.weight.data.clone()
+            local_block.norm1.bias.data = orig_block.norm1.bias.data.clone()
+            
+            local_block.norm2.weight.data = orig_block.norm2.weight.data.clone()
+            local_block.norm2.bias.data = orig_block.norm2.bias.data.clone()
+        
+        # Copy encoder norm parameters
+        self.local_causal_encoder_norm.weight.data = self.encoder_norm.weight.data.clone()
+        self.local_causal_encoder_norm.bias.data = self.encoder_norm.bias.data.clone()
+
+    def initialize_fusion_weights(self):
+        """Initialize only the fusion network weights, preserving copied parameters"""
+        # 只初始化融合网络的参数
+        for m in self.feature_fusion.modules():
+            if isinstance(m, nn.Linear):
+                torch.nn.init.xavier_uniform_(m.weight)
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.LayerNorm):
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+                if m.weight is not None:
+                    nn.init.constant_(m.weight, 1.0)
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
@@ -686,32 +823,37 @@ class MAR(nn.Module):
         x = self.z_proj_ln(x)
 
         # ========= Transformer Encoder Blocks =========
+        # Original transformer processing
         if self.grad_checkpointing and not torch.jit.is_scripting():
             for block in self.encoder_blocks:
                 x = checkpoint(block, x)
         else:
             for block in self.encoder_blocks:
                 x = block(x)
-        x = self.encoder_norm(x)
+        global_features = self.encoder_norm(x)
 
-        # ========= Local Causal Attention Blocks =========
-        local_x = x
-        for block in self.local_causal_blocks:
-            local_x = block(local_x)
+        # ========= Local Causal Transformer Processing =========
+        # Process with local causal attention (copy of original processing)
+        local_x = x.clone()  # Start with the same input
+        if self.grad_checkpointing and not torch.jit.is_scripting():
+            for block in self.local_causal_encoder_blocks:
+                local_x = checkpoint(block, local_x)
+        else:
+            for block in self.local_causal_encoder_blocks:
+                local_x = block(local_x)
+        local_features = self.local_causal_encoder_norm(local_x)
         
         # ========= Feature Fusion =========
-        # 计算门控权重
-        concat_features = torch.cat([x, local_x], dim=-1)
-        gate_weights = self.gate(concat_features)
+        # 现在使用真正的local attention特征进行融合
+        lambda_local = self.lambda_local
         
-        # 加权融合
-        weighted_local = local_x * gate_weights
-        weighted_global = x * (1 - gate_weights)
-        
-        # 最终融合
-        fused_x = self.feature_fusion(
-            torch.cat([weighted_global, weighted_local], dim=-1)
+        # 残差连接：global_features + small_adjustment
+        adjustment = self.feature_fusion(
+            torch.cat([global_features, local_features], dim=-1)
         )
+        
+        # 使用很小的权重来避免破坏原始特征
+        fused_x = global_features + lambda_local * adjustment
 
         return fused_x
 

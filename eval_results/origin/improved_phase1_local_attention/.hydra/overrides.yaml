@@ -1,0 +1,6 @@
+- model.policy.autoregressive_model_params.pretrained_model_path=checkpoints/improved_phase1_local_only.ckpt
+- model.policy.action_model_params.predict_action=True
+- training.num_epochs=50
+- model.policy.optimizer.learning_rate=5e-5
+- dataloader.batch_size=8
+- logging.mode=offline

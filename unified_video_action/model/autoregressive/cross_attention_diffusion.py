@@ -210,10 +210,13 @@ class CrossAttentionAdaLN(nn.Module):
       
       for module in self.modules():
         if isinstance(module, nn.LayerNorm):
-          nn.init.constant_(module.bias, 0)
-          nn.init.constant_(module.weight, 1.0)
+          if module.bias is not None:
+            nn.init.constant_(module.bias, 0)
+          if module.weight is not None:
+            nn.init.constant_(module.weight, 1.0)
       
-      nn.init.constant_(self.final_layer.linear.bias, 0)
+      if hasattr(self.final_layer, 'linear') and self.final_layer.linear.bias is not None:
+        nn.init.constant_(self.final_layer.linear.bias, 0)
 
   def forward(self, x ,t , c):
       x = self.input_proj(x)

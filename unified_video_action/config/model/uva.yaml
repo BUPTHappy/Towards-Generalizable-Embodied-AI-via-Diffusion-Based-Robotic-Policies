@@ -50,7 +50,7 @@ policy:
     
   action_model_params:
     predict_action: True
-    act_model_type: cross_attention
+    act_model_type: conv_fc
     num_attention_heads: 8
     attention_dropout: 0.1
   

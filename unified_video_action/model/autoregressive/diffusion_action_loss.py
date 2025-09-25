@@ -4,7 +4,7 @@ from einops import rearrange
 
 from unified_video_action.model.autoregressive.diffusion import create_diffusion
 from unified_video_action.model.autoregressive.diffusion_loss import SimpleMLPAdaLN
-from unified_video_action.model.autoregressive.cross_attention_diffusion import CrossAttentionAdaLN
+#from unified_video_action.model.autoregressive.cross_attention_diffusion import CrossAttentionAdaLN
 
 
 #实现基于扩散模型的动作预测损失函数的主要代码，用于从视频特征预测动作序列
@@ -93,28 +93,22 @@ class DiffActLoss(nn.Module):
                 nn.Linear(256, 16)
             )
             
+        # Cross attention model - no preprocessing needed
+        elif self.act_model_type == 'cross_attention':
+            pass
+            
         else:
             raise NotImplementedError
 
-        #replace SimpleMLPAdaLN with our CrossAttentionAdaLN
-        if self.act_model_type == "cross_attention":
-            self.net = CrossAttentionAdaLN(
-                in_channels=target_channels,
-                model_channels=width,
-                out_channels=target_channels * 2,  # for vlb loss
-                z_channels=z_channels,
-                num_res_blocks=depth,
-                num_attention_heads=num_attention_heads,
-                grad_checkpointing=grad_checkpointing,
-        )
-        else: 
-            self.net = SimpleMLPAdaLN(
-                in_channels=target_channels,
-                model_channels=width,
-                out_channels=target_channels * 2,  # for vlb loss
-                z_channels=z_channels,
-                num_res_blocks=depth,
-                grad_checkpointing=grad_checkpointing,
+        # 强制使用SimpleMLPAdaLN以保持预训练参数
+        # 暂时不使用CrossAttentionAdaLN，因为参数是初始化的会影响效果
+        self.net = SimpleMLPAdaLN(
+            in_channels=target_channels,
+            model_channels=width,
+            out_channels=target_channels * 2,  # for vlb loss
+            z_channels=z_channels,
+            num_res_blocks=depth,
+            grad_checkpointing=grad_checkpointing,
         )
 
         self.train_diffusion = create_diffusion(
@@ -161,6 +155,10 @@ class DiffActLoss(nn.Module):
         elif self.act_model_type == 'fc2':
             z = self.fc(z.transpose(1, 2))
             z = z.transpose(1, 2)
+            
+        elif self.act_model_type == 'cross_attention':
+            # 现在强制使用SimpleMLPAdaLN，不需要特殊预处理
+            pass
             
         else:
             raise NotImplementedError
@@ -221,6 +219,10 @@ class DiffActLoss(nn.Module):
         elif self.act_model_type == 'fc2':
             z = self.fc(z.transpose(1, 2))
             z = z.transpose(1, 2)
+            
+        elif self.act_model_type == 'cross_attention':
+            # 现在强制使用SimpleMLPAdaLN，不需要特殊预处理
+            pass
             
         else:
             raise NotImplementedError
