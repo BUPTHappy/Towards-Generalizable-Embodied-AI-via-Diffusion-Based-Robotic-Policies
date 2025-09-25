@@ -238,6 +238,7 @@ class CrossAttentionAdaLN(nn.Module):
           x = block(x, video_feature, y)
 
       x = x.squeeze(1) #[N, model_channels]
+      return self.final_layer(x, y)
   
   def forward_with_cfg(self, x, t, c, cfg_scale):
       half = x[: len(x) // 2]

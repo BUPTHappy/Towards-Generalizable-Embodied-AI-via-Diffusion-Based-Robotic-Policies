@@ -118,6 +118,9 @@ class UnifiedVideoActionPolicy(BaseImagePolicy):
             else:
                 print('pretrained model not found: ', self.pretrained_model_path)
         
+        # Apply freeze and LoRA settings after model loading
+        self.apply_freeze_and_lora()
+        
         self.normalizer = LinearNormalizer()
 
         if self.selected_training_mode is None:
@@ -186,6 +189,9 @@ class UnifiedVideoActionPolicy(BaseImagePolicy):
                     print(f"Loaded {len(pretrained_state_dict)} compatible parameters from pretrained model")
                 else:
                     print("Warning: No compatible parameters found in pretrained model, continuing without loading pretrained weights")
+        
+        # Load distilled operator weights if specified
+        self.load_distilled_weights()
 
                 missing_keys, unexpected_keys = self.model.load_state_dict(
                     model_state_dict, strict=False
@@ -446,3 +452,100 @@ class UnifiedVideoActionPolicy(BaseImagePolicy):
 
     def forward(self, batch, **kwargs):
         return self.compute_loss(batch, **kwargs)
+    
+    def load_distilled_weights(self):
+        """Load distilled operator weights for cross-attention head"""
+        # Check if head_init_paths is specified in action_model_params
+        if hasattr(self.autoregressive_model_params, 'action_model_params') and \
+           hasattr(self.autoregressive_model_params.action_model_params, 'head_init_paths'):
+            
+            head_init_paths = self.autoregressive_model_params.action_model_params.head_init_paths
+            
+            if head_init_paths and any(head_init_paths.values()):
+                print("----------------------------------------------------------------------")
+                print("Loading distilled operator weights for cross-attention head")
+                print("----------------------------------------------------------------------")
+                
+                # Load cross-attention weights
+                if head_init_paths.get('cross_attn') and os.path.exists(head_init_paths['cross_attn']):
+                    print(f"Loading cross-attention weights from: {head_init_paths['cross_attn']}")
+                    cross_attn_weights = torch.load(head_init_paths['cross_attn'], map_location='cpu')
+                    # Load into the diffusion action head
+                    if hasattr(self.model, 'diffactloss') and hasattr(self.model.diffactloss, 'net'):
+                        net = self.model.diffactloss.net
+                        if hasattr(net, 'cross_attn_blocks'):
+                            # Load into first cross-attention block
+                            net.cross_attn_blocks[0].load_state_dict(cross_attn_weights, strict=False)
+                            print("Cross-attention weights loaded successfully")
+                
+                # Load self-attention weights
+                if head_init_paths.get('self_attn') and os.path.exists(head_init_paths['self_attn']):
+                    print(f"Loading self-attention weights from: {head_init_paths['self_attn']}")
+                    self_attn_weights = torch.load(head_init_paths['self_attn'], map_location='cpu')
+                    # Load into the diffusion action head
+                    if hasattr(self.model, 'diffactloss') and hasattr(self.model.diffactloss, 'net'):
+                        net = self.model.diffactloss.net
+                        if hasattr(net, 'cross_attn_blocks'):
+                            # Load into first cross-attention block (reusing the same structure)
+                            net.cross_attn_blocks[0].load_state_dict(self_attn_weights, strict=False)
+                            print("Self-attention weights loaded successfully")
+                
+                # Load MLP weights
+                if head_init_paths.get('mlp') and os.path.exists(head_init_paths['mlp']):
+                    print(f"Loading MLP weights from: {head_init_paths['mlp']}")
+                    mlp_weights = torch.load(head_init_paths['mlp'], map_location='cpu')
+                    # Load into the diffusion action head
+                    if hasattr(self.model, 'diffactloss') and hasattr(self.model.diffactloss, 'net'):
+                        net = self.model.diffactloss.net
+                        if hasattr(net, 'cross_attn_blocks'):
+                            # Load into first cross-attention block's MLP
+                            net.cross_attn_blocks[0].mlp.load_state_dict(mlp_weights, strict=False)
+                            print("MLP weights loaded successfully")
+                
+                print("----------------------------------------------------------------------")
+                print("Distilled weights loading completed")
+                print("----------------------------------------------------------------------")
+            else:
+                print("No distilled weights specified, using random initialization")
+    
+    def apply_freeze_and_lora(self):
+        """Apply parameter freezing and LoRA if specified"""
+        # Check if finetune config is available
+        if hasattr(self.autoregressive_model_params, 'action_model_params') and \
+           hasattr(self.autoregressive_model_params.action_model_params, 'finetune'):
+            
+            finetune_config = self.autoregressive_model_params.action_model_params.finetune
+            
+            if finetune_config.get('freeze_encoder', False):
+                print("----------------------------------------------------------------------")
+                print("Freezing encoder parameters")
+                print("----------------------------------------------------------------------")
+                
+                # Freeze encoder blocks
+                for param in self.model.encoder_blocks.parameters():
+                    param.requires_grad = False
+                
+                # Freeze local causal encoder blocks
+                for param in self.model.local_causal_encoder_blocks.parameters():
+                    param.requires_grad = False
+                
+                # Freeze encoder norm
+                for param in self.model.encoder_norm.parameters():
+                    param.requires_grad = False
+                
+                # Freeze local causal encoder norm
+                for param in self.model.local_causal_encoder_norm.parameters():
+                    param.requires_grad = False
+                
+                # Freeze feature fusion
+                for param in self.model.feature_fusion.parameters():
+                    param.requires_grad = False
+                
+                print("Encoder parameters frozen")
+            
+            if finetune_config.get('use_lora', False):
+                print("----------------------------------------------------------------------")
+                print("LoRA support not yet implemented")
+                print("----------------------------------------------------------------------")
+                # TODO: Implement LoRA support
+                pass

@@ -100,16 +100,29 @@ class DiffActLoss(nn.Module):
         else:
             raise NotImplementedError
 
-        # 强制使用SimpleMLPAdaLN以保持预训练参数
-        # 暂时不使用CrossAttentionAdaLN，因为参数是初始化的会影响效果
-        self.net = SimpleMLPAdaLN(
-            in_channels=target_channels,
-            model_channels=width,
-            out_channels=target_channels * 2,  # for vlb loss
-            z_channels=z_channels,
-            num_res_blocks=depth,
-            grad_checkpointing=grad_checkpointing,
-        )
+        # Use CrossAttentionAdaLN for cross_attention model type
+        if self.act_model_type == 'cross_attention':
+            from unified_video_action.model.autoregressive.cross_attention_diffusion import CrossAttentionAdaLN
+            self.net = CrossAttentionAdaLN(
+                in_channels=target_channels,
+                model_channels=width,
+                out_channels=target_channels * 2,  # for vlb loss
+                z_channels=z_channels,
+                num_res_blocks=depth,
+                num_heads=num_attention_heads,
+                grad_checkpointing=grad_checkpointing,
+            )
+        else:
+            # 强制使用SimpleMLPAdaLN以保持预训练参数
+            # 暂时不使用CrossAttentionAdaLN，因为参数是初始化的会影响效果
+            self.net = SimpleMLPAdaLN(
+                in_channels=target_channels,
+                model_channels=width,
+                out_channels=target_channels * 2,  # for vlb loss
+                z_channels=z_channels,
+                num_res_blocks=depth,
+                grad_checkpointing=grad_checkpointing,
+            )
 
         self.train_diffusion = create_diffusion(
             timestep_respacing="",

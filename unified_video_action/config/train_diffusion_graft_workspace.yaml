@@ -1,0 +1,152 @@
+name: uva_graft_head
+
+defaults:
+  - _self_
+  - task: pusht
+  - model: uva
+
+dataloader:
+  batch_size: 32
+  num_workers: 8
+  persistent_workers: false
+  pin_memory: true
+  shuffle: true
+
+val_dataloader:
+  batch_size: 32
+  num_workers: 8
+  persistent_workers: false
+  pin_memory: true
+  shuffle: false
+
+training:
+  checkpoint_every: 10
+  debug: false
+  device: cuda:0
+  gradient_accumulate_every: 1
+  lr_scheduler: cosine
+  lr_warmup_steps: 1000
+  max_train_steps: null
+  max_val_steps: null
+  num_epochs: 3050
+  resume: true
+  rollout_every: 10
+  sample_every: 5
+  seed: 42
+  tqdm_interval_sec: 1.0
+  use_ema: true
+  val_every: 1
+  mixed_precision: 'fp16'
+  # Stage 2 specific settings
+  steps: 50000  # Reduced training steps for fine-tuning
+  data_fraction: 0.10  # Use only 10% of data for fine-tuning
+  
+checkpoint:
+  save_last_ckpt: true
+  save_last_snapshot: false
+  topk:
+    monitor_key: test_mean_score
+    format_str: epoch={epoch:04d}-test_mean_score={test_mean_score:.3f}.ckpt
+    k: 1
+    mode: max
+
+ema:
+  _target_: unified_video_action.model.autoregressive.ema_model.EMAModel
+  inv_gamma: 1.0
+  max_value: 0.9999
+  min_value: 0.0
+  power: 0.75
+  update_after_step: 0
+
+logging:
+  group: null
+  id: null
+  mode: online
+  name: train_uva_graft_head
+  project: unified_video_action
+  resume: true
+  tags:
+  - train_uva_graft_head
+  - pusht
+  - graft_head
+  - stage2
+
+multi_run:
+  run_dir: data/outputs/train_uva_graft_head
+  wandb_name_base: train_uva_graft_head
+
+# Stage 2 specific configuration
+policy:
+  _target_: unified_video_action.policy.unified_video_action_policy.UnifiedVideoActionPolicy
+  selected_training_mode: null
+  debug: None
+  n_action_steps: 8
+  use_proprioception: null
+  use_history_action: null
+  action_mask_ratio: 0.5
+  different_history_freq: null
+  predict_wrist_img: null
+  predict_proprioception: null
+  shape_meta: ${task.shape_meta}
+  
+  vae_model_params:
+    autoencoder_path: pretrained_models/vae/kl16.ckpt
+    ddconfig:
+      vae_embed_dim: 16
+      ch_mult: [1, 1, 2, 2, 4]
+
+  autoregressive_model_params:
+    pretrained_model_path: 'pretrained_models/mar/mar_base/checkpoint-last.pth'
+    model_size: mar_base
+    img_size: 256
+    vae_stride: 16
+    patch_size: 1
+    vae_embed_dim: 16
+    mask_ratio_min: 0.7
+    label_drop_prob: 0.1
+    attn_dropout: 0.1
+    proj_dropout: 0.1
+    # each frame 256 visual tokens, 4 frames as condition
+    diffloss_d: 6
+    diffloss_w: 1024
+    diffloss_act_d: 6
+    diffloss_act_w: 1024
+    num_sampling_steps: "100"
+    diffusion_batch_mul: 1
+    grad_checkpointing: False
+    #
+    num_iter: 1
+    cfg: 1
+    cfg_schedule: "linear"
+    temperature: 0.95
+    predict_video: True
+    #
+    act_diff_training_steps: 1000
+    act_diff_testing_steps: "100"
+    
+  action_model_params:
+    predict_action: True
+    act_model_type: cross_attention  # Use the new cross-attention head
+    num_attention_heads: 8
+    attention_dropout: 0.1
+    # Stage 2: Paths to distilled operator weights
+    head_init_paths:
+      cross_attn: null  # Will be set via command line
+      self_attn: null   # Will be set via command line
+      mlp: null         # Will be set via command line
+  
+  # Stage 2: Fine-tuning configuration
+  finetune:
+    freeze_encoder: true  # Freeze encoder, only train head
+    use_lora: false       # Use LoRA for parameter-efficient fine-tuning
+    lora_rank: 64         # LoRA rank if enabled
+    freeze_layers: []     # Additional layers to freeze
+  
+  shift_action: True
+    
+  optimizer:
+    learning_rate: 0.0001  # Lower learning rate for fine-tuning
+    weight_decay: 0.02
+    betas:
+    - 0.9
+    - 0.95
